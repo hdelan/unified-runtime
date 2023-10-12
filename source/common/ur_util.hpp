@@ -293,4 +293,13 @@ inline ur_result_t exceptionToResult(std::exception_ptr eptr) {
     }
 }
 
+inline std::pair<std::string, std::string>
+splitMetadataName(const std::string &metadataName) {
+    size_t splitPos = metadataName.rfind('@');
+    if (splitPos == std::string::npos) {
+        return std::make_pair(metadataName, std::string{});
+    }
+    return std::make_pair(metadataName.substr(0, splitPos),
+                          metadataName.substr(splitPos, metadataName.length()));
+}
 #endif /* UR_UTIL_H */
