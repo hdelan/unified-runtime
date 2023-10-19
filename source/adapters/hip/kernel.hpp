@@ -59,6 +59,14 @@ struct ur_kernel_handle_t_ {
     args_index_t Indices;
     args_size_t OffsetPerIndex;
     std::set<const void *> PtrArgs;
+    // A struct to keep track of memargs so that we can do dependency analysis
+    // at urEnqueueKernelLaunch
+    struct mem_obj_arg {
+      ur_mem_handle_t_ *Mem;
+      int Index;
+      ur_mem_flags_t AccessFlags;
+    };
+    std::vector<mem_obj_arg> MemObjArgs;
 
     std::uint32_t ImplicitOffsetArgs[3] = {0, 0, 0};
 
@@ -110,6 +118,20 @@ struct ur_kernel_handle_t_ {
 
       addArg(Index, sizeof(size_t), (const void *)&AlignedLocalOffset,
              Size + AlignedLocalOffset - LocalOffset);
+    }
+
+    void addMemObjArg(int Index, ur_mem_handle_t hMem, ur_mem_flags_t Flags) {
+      assert(hMem && "Invalid mem handle");
+      // To avoid redundancy we are not storing mem obj with index i at index
+      // i in the vec of MemObjArgs.
+      for (auto i = 0u; i < MemObjArgs.size(); ++i) {
+        if (MemObjArgs[i].Index == Index) {
+          // Overwrite the mem obj with the same index
+          MemObjArgs[i] = arguments::mem_obj_arg{hMem, Index, Flags};
+          return;
+        }
+      }
+      MemObjArgs.push_back(arguments::mem_obj_arg{hMem, Index, Flags});
     }
 
     void setImplicitOffset(size_t Size, std::uint32_t *ImplicitOffset) {
@@ -169,10 +191,10 @@ struct ur_kernel_handle_t_ {
 
   const char *getName() const noexcept { return Name.c_str(); }
 
-  /// Get the number of kernel arguments, excluding the implicit global offset.
-  /// Note this only returns the current known number of arguments, not the
-  /// real one required by the kernel, since this cannot be queried from
-  /// the HIP Driver API
+  /// Get the number of kernel arguments, excluding the implicit global
+  /// offset. Note this only returns the current known number of arguments,
+  /// not the real one required by the kernel, since this cannot be queried
+  /// from the HIP Driver API
   uint32_t getNumArgs() const noexcept { return Args.Indices.size() - 1; }
 
   void setKernelArg(int Index, size_t Size, const void *Arg) {

@@ -1,2 +1,19 @@
-urMemBufferCreateWithNativeHandleTest.Success/AMD_HIP_BACKEND___{{.*}}_
-Segmentation fault
+urMemGetInfoTest.InvalidNullPointerParamValue/AMD_HIP_BACKEND___{{.*}}
+urMemGetInfoTest.InvalidNullPointerParamValue/AMD_HIP_BACKEND___{{.*}}
+urMemGetInfoTest.InvalidNullPointerPropSizeRet/AMD_HIP_BACKEND___{{.*}}
+urMemGetInfoTest.InvalidNullPointerPropSizeRet/AMD_HIP_BACKEND___{{.*}}
+urMemImageCreateTest.InvalidSize/AMD_HIP_BACKEND___{{.*}}
+urMemImageGetInfoTest.Success/AMD_HIP_BACKEND___{{.*}}
+urMemImageGetInfoTest.Success/AMD_HIP_BACKEND___{{.*}}
+urMemImageGetInfoTest.Success/AMD_HIP_BACKEND___{{.*}}
+urMemImageGetInfoTest.Success/AMD_HIP_BACKEND___{{.*}}
+urMemImageGetInfoTest.Success/AMD_HIP_BACKEND___{{.*}}
+urMemImageGetInfoTest.Success/AMD_HIP_BACKEND___{{.*}}
+urMemImageGetInfoTest.Success/AMD_HIP_BACKEND___{{.*}}
+urMemImageGetInfoTest.InvalidSizeSmall/AMD_HIP_BACKEND___{{.*}}
+urMemImageGetInfoTest.InvalidSizeSmall/AMD_HIP_BACKEND___{{.*}}
+urMemImageGetInfoTest.InvalidSizeSmall/AMD_HIP_BACKEND___{{.*}}
+urMemImageGetInfoTest.InvalidSizeSmall/AMD_HIP_BACKEND___{{.*}}
+urMemImageGetInfoTest.InvalidSizeSmall/AMD_HIP_BACKEND___{{.*}}
+urMemImageGetInfoTest.InvalidSizeSmall/AMD_HIP_BACKEND___{{.*}}
+urMemImageGetInfoTest.InvalidSizeSmall/AMD_HIP_BACKEND___{{.*}}
