@@ -23,6 +23,7 @@ struct ur_program_handle_t_ {
   size_t BinarySizeInBytes;
   std::atomic_uint32_t RefCount;
   ur_context_handle_t Context;
+  ur_device_handle_t Device;
 
   constexpr static size_t MAX_LOG_SIZE = 8192u;
 
@@ -30,13 +31,23 @@ struct ur_program_handle_t_ {
   std::string BuildOptions;
   ur_program_build_status_t BuildStatus = UR_PROGRAM_BUILD_STATUS_NONE;
 
-  ur_program_handle_t_(ur_context_handle_t Ctxt);
-  ~ur_program_handle_t_();
+  ur_program_handle_t_(ur_context_handle_t Ctxt, ur_device_handle_t Device)
+      : Module{nullptr}, Binary{},
+        BinarySizeInBytes{0}, RefCount{1}, Context{Ctxt}, Device{Device} {
+    urContextRetain(Context);
+    urDeviceRetain(Device);
+  }
+
+  ~ur_program_handle_t_() {
+    urContextRelease(Context);
+    urDeviceRelease(Device);
+  }
 
   ur_result_t setBinary(const char *Binary, size_t BinarySizeInBytes);
 
   ur_result_t buildProgram(const char *BuildOptions);
   ur_context_handle_t getContext() const { return Context; };
+  ur_device_handle_t getDevice() const { return Device; };
 
   native_type get() const noexcept { return Module; };
 

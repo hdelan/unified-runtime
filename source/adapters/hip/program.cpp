@@ -10,14 +10,6 @@
 
 #include "program.hpp"
 
-ur_program_handle_t_::ur_program_handle_t_(ur_context_handle_t Ctxt)
-    : Module{nullptr}, Binary{}, BinarySizeInBytes{0}, RefCount{1}, Context{
-                                                                        Ctxt} {
-  urContextRetain(Context);
-}
-
-ur_program_handle_t_::~ur_program_handle_t_() { urContextRelease(Context); }
-
 ur_result_t ur_program_handle_t_::setBinary(const char *Source, size_t Length) {
   // Do not re-set program binary data which has already been set as that will
   // delete the old binary data.
@@ -69,18 +61,13 @@ ur_result_t getKernelNames(ur_program_handle_t) {
   return UR_RESULT_ERROR_UNSUPPORTED_FEATURE;
 }
 
-/// HIP will handle the PTX/HIPBIN binaries internally through hipModule_t
-/// object. So, urProgramCreateWithIL and urProgramCreateWithBinary are
-/// equivalent in terms of HIP adapter. See \ref urProgramCreateWithBinary.
+/// A program must be specific to a device so this entry point is UNSUPPORTED
 UR_APIEXPORT ur_result_t UR_APICALL
-urProgramCreateWithIL(ur_context_handle_t hContext, const void *pIL,
-                      size_t length, const ur_program_properties_t *pProperties,
-                      ur_program_handle_t *phProgram) {
-  ur_device_handle_t hDevice = hContext->getDevice();
-  const auto pBinary = reinterpret_cast<const uint8_t *>(pIL);
-
-  return urProgramCreateWithBinary(hContext, hDevice, length, pBinary,
-                                   pProperties, phProgram);
+urProgramCreateWithIL(ur_context_handle_t, const void *, size_t,
+                      const ur_program_properties_t *, ur_program_handle_t *) {
+  detail::ur::die("urProgramCreateWithIL not implemented for HIP adapter"
+                  " please use urProgramCreateWithBinary instead");
+  return UR_RESULT_ERROR_UNSUPPORTED_FEATURE;
 }
 
 /// HIP will handle the PTX/HIPBIN binaries internally through a call to
@@ -101,7 +88,7 @@ UR_APIEXPORT ur_result_t UR_APICALL urProgramBuild(ur_context_handle_t,
   ur_result_t Result = UR_RESULT_SUCCESS;
 
   try {
-    ScopedContext Active(hProgram->getContext()->getDevice());
+    ScopedContext Active(hProgram->getDevice());
 
     hProgram->buildProgram(pOptions);
 
@@ -167,7 +154,7 @@ urProgramGetInfo(ur_program_handle_t hProgram, ur_program_info_t propName,
   case UR_PROGRAM_INFO_NUM_DEVICES:
     return ReturnValue(1u);
   case UR_PROGRAM_INFO_DEVICES:
-    return ReturnValue(&hProgram->Context->DeviceId, 1);
+    return ReturnValue(hProgram->getDevice(), 1);
   case UR_PROGRAM_INFO_SOURCE:
     return ReturnValue(hProgram->Binary);
   case UR_PROGRAM_INFO_BINARY_SIZES:
@@ -207,7 +194,7 @@ urProgramRelease(ur_program_handle_t hProgram) {
     ur_result_t Result = UR_RESULT_ERROR_INVALID_PROGRAM;
 
     try {
-      ScopedContext Active(hProgram->getContext()->getDevice());
+      ScopedContext Active(hProgram->getDevice());
       auto HIPModule = hProgram->get();
       if (HIPModule) {
         UR_CHECK_ERROR(hipModuleUnload(HIPModule));
@@ -249,13 +236,15 @@ UR_APIEXPORT ur_result_t UR_APICALL urProgramCreateWithBinary(
     const uint8_t *pBinary, const ur_program_properties_t *,
     ur_program_handle_t *phProgram) {
   UR_ASSERT(pBinary != nullptr && size != 0, UR_RESULT_ERROR_INVALID_BINARY);
-  UR_ASSERT(hContext->getDevice()->get() == hDevice->get(),
+  UR_ASSERT(std::find(hContext->getDevices().begin(),
+                      hContext->getDevices().end(),
+                      hDevice) != hContext->getDevices().end(),
             UR_RESULT_ERROR_INVALID_CONTEXT);
 
   ur_result_t Result = UR_RESULT_SUCCESS;
 
   std::unique_ptr<ur_program_handle_t_> RetProgram{
-      new ur_program_handle_t_{hContext}};
+      new ur_program_handle_t_{hContext, hDevice}};
 
   // TODO: Set metadata here and use reqd_work_group_size information.
   // See urProgramCreateWithBinary in CUDA adapter.
@@ -286,8 +275,7 @@ UR_APIEXPORT ur_result_t UR_APICALL urProgramGetFunctionPointer(
     ur_device_handle_t hDevice, ur_program_handle_t hProgram,
     const char *pFunctionName, void **ppFunctionPointer) {
   // Check if device passed is the same the device bound to the context
-  UR_ASSERT(hDevice == hProgram->getContext()->getDevice(),
-            UR_RESULT_ERROR_INVALID_DEVICE);
+  UR_ASSERT(hDevice == hProgram->getDevice(), UR_RESULT_ERROR_INVALID_DEVICE);
 
   hipFunction_t Func;
   hipError_t Ret = hipModuleGetFunction(&Func, hProgram->get(), pFunctionName);

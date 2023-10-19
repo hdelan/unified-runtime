@@ -36,19 +36,18 @@ static size_t imageElementByteSize(hipArray_Format ArrayFormat) {
   return 0;
 }
 
-ur_result_t enqueueEventsWait(ur_queue_handle_t CommandQueue,
-                              hipStream_t Stream, uint32_t NumEventsInWaitList,
+ur_result_t enqueueEventsWait(ur_queue_handle_t, hipStream_t Stream,
+                              uint32_t NumEventsInWaitList,
                               const ur_event_handle_t *EventWaitList) {
   if (!EventWaitList) {
     return UR_RESULT_SUCCESS;
   }
   try {
-    ScopedContext Active(CommandQueue->getDevice());
-
     auto Result = forLatestEvents(
         EventWaitList, NumEventsInWaitList,
         [Stream](ur_event_handle_t Event) -> ur_result_t {
-          if (Event->getStream() == Stream) {
+          ScopedContext Active(Event->getDevice());
+          if (Event->isCompleted() || Event->getStream() == Stream) {
             return UR_RESULT_SUCCESS;
           } else {
             UR_CHECK_ERROR(hipStreamWaitEvent(Stream, Event->get(), 0));
@@ -95,6 +94,7 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferWrite(
             UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
   UR_ASSERT(!(phEventWaitList != NULL && numEventsInWaitList == 0),
             UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
+  UR_ASSERT(hBuffer->isBuffer(), UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
 
   ur_result_t Result = UR_RESULT_SUCCESS;
   std::unique_ptr<ur_event_handle_t_> RetImplEvent{nullptr};
@@ -102,8 +102,8 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferWrite(
   try {
     ScopedContext Active(hQueue->getDevice());
     hipStream_t HIPStream = hQueue->getNextTransferStream();
-    Result = enqueueEventsWait(hQueue, HIPStream, numEventsInWaitList,
-                               phEventWaitList);
+    UR_CHECK_ERROR(enqueueEventsWait(hQueue, HIPStream, numEventsInWaitList,
+                                     phEventWaitList));
 
     if (phEvent) {
       RetImplEvent =
@@ -112,9 +112,10 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferWrite(
       UR_CHECK_ERROR(RetImplEvent->start());
     }
 
-    UR_CHECK_ERROR(hipMemcpyHtoDAsync(
-        std::get<BufferMem>(hBuffer->Mem).getWithOffset(offset),
-        const_cast<void *>(pSrc), size, HIPStream));
+    UR_CHECK_ERROR(
+        hipMemcpyHtoDAsync(std::get<BufferMem>(hBuffer->Mem)
+                               .getPtrWithOffset(hQueue->getDevice(), offset),
+                           const_cast<void *>(pSrc), size, HIPStream));
 
     if (phEvent) {
       UR_CHECK_ERROR(RetImplEvent->record());
@@ -141,15 +142,33 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferRead(
             UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
   UR_ASSERT(!(phEventWaitList != NULL && numEventsInWaitList == 0),
             UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
+  UR_ASSERT(hBuffer->isBuffer(), UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
 
   ur_result_t Result = UR_RESULT_SUCCESS;
   std::unique_ptr<ur_event_handle_t_> RetImplEvent{nullptr};
 
+  ur_lock MemoryMigrationLock{hBuffer->MemoryMigrationMutex};
+  // Note that this entry point may be called on a specific queue that may not
+  // be the last queue to write to the MemBuffer
+  auto DeviceToCopyFrom = hBuffer->LastEventWritingToMemObj == nullptr
+                              ? hQueue->getDevice()
+                              : hBuffer->LastEventWritingToMemObj->getDevice();
+
   try {
-    ScopedContext Active(hQueue->getDevice());
-    hipStream_t HIPStream = hQueue->getNextTransferStream();
+    ScopedContext Active(DeviceToCopyFrom);
+    // Use the default stream if copying from another device
+    hipStream_t HIPStream = DeviceToCopyFrom == hQueue->getDevice()
+                                ? hQueue->getNextTransferStream()
+                                : hipStream_t{0};
     Result = enqueueEventsWait(hQueue, HIPStream, numEventsInWaitList,
                                phEventWaitList);
+    if (hBuffer->LastEventWritingToMemObj != nullptr &&
+        hQueue->getDevice() != DeviceToCopyFrom) {
+      // We may have to wait for an event on another queue if it is the last
+      // event writing to mem obj
+      UR_CHECK_ERROR(enqueueEventsWait(hQueue, HIPStream, 1,
+                                       &hBuffer->LastEventWritingToMemObj));
+    }
 
     if (phEvent) {
       RetImplEvent =
@@ -158,9 +177,13 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferRead(
       UR_CHECK_ERROR(RetImplEvent->start());
     }
 
-    UR_CHECK_ERROR(hipMemcpyDtoHAsync(
-        pDst, std::get<BufferMem>(hBuffer->Mem).getWithOffset(offset), size,
-        HIPStream));
+    // Copying from the device with latest version of memory, not necessarily
+    // the device associated with the Queue
+    UR_CHECK_ERROR(
+        hipMemcpyDtoHAsync(pDst,
+                           std::get<BufferMem>(hBuffer->Mem)
+                               .getPtrWithOffset(DeviceToCopyFrom, offset),
+                           size, HIPStream));
 
     if (phEvent) {
       UR_CHECK_ERROR(RetImplEvent->record());
@@ -190,9 +213,44 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueKernelLaunch(
   UR_ASSERT(workDim > 0, UR_RESULT_ERROR_INVALID_WORK_DIMENSION);
   UR_ASSERT(workDim < 4, UR_RESULT_ERROR_INVALID_WORK_DIMENSION);
 
+  std::vector<ur_event_handle_t> DepEvents(
+      phEventWaitList, phEventWaitList + numEventsInWaitList);
+  std::vector<std::pair<ur_mem_handle_t, ur_lock>> MemMigrationLocks;
+
+  // phEventWaitList only contains events that are handed to UR by the SYCL
+  // runtime. However since UR handles memory dependencies within a context
+  // we may need to add more events to our dependent events list if the UR
+  // context contains multiple devices
+  if (hQueue->getContext()->NumDevices > 1) {
+    MemMigrationLocks.reserve(hKernel->Args.MemObjArgs.size());
+    for (auto &MemArg : hKernel->Args.MemObjArgs) {
+      bool PushBack = false;
+      if (auto MemDepEvent = MemArg.Mem->LastEventWritingToMemObj;
+          MemDepEvent && std::find(DepEvents.begin(), DepEvents.end(),
+                                   MemDepEvent) == DepEvents.end()) {
+        DepEvents.push_back(MemDepEvent);
+        PushBack = true;
+      }
+      if ((MemArg.AccessFlags &
+           (UR_MEM_FLAG_READ_WRITE | UR_MEM_FLAG_WRITE_ONLY)) ||
+          PushBack) {
+        if (std::find_if(MemMigrationLocks.begin(), MemMigrationLocks.end(),
+                         [MemArg](auto &Lock) {
+                           return Lock.first == MemArg.Mem;
+                         }) == MemMigrationLocks.end())
+          MemMigrationLocks.emplace_back(
+              std::pair{MemArg.Mem, ur_lock{MemArg.Mem->MemoryMigrationMutex}});
+      }
+    }
+  }
+
+  // Early exit for zero size range kernel
   if (*pGlobalWorkSize == 0) {
-    return urEnqueueEventsWaitWithBarrier(hQueue, numEventsInWaitList,
-                                          phEventWaitList, phEvent);
+    if (DepEvents.size()) {
+      return urEnqueueEventsWaitWithBarrier(hQueue, numEventsInWaitList,
+                                            phEventWaitList, phEvent);
+    }
+    return UR_RESULT_SUCCESS;
   }
 
   // Set the number of threads per block to the number of threads per warp
@@ -274,8 +332,18 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueKernelLaunch(
       if (hipMemPrefetchAsync(Addr, Size, HIPDev, HIPStream) != hipSuccess)
         return UR_RESULT_ERROR_INVALID_KERNEL_ARGS;
     }
-    Result = enqueueEventsWait(hQueue, HIPStream, numEventsInWaitList,
-                               phEventWaitList);
+
+    if (DepEvents.size()) {
+      UR_CHECK_ERROR(enqueueEventsWait(hQueue, HIPStream, numEventsInWaitList,
+                                       DepEvents.data()));
+    }
+
+    // For memory migration across devices in the same context
+    if (hQueue->getContext()->NumDevices > 1) {
+      for (auto &MemArg : hKernel->Args.MemObjArgs) {
+        migrateMemoryToDeviceIfNeeded(MemArg.Mem, hQueue->getDevice());
+      }
+    }
 
     // Set the implicit global offset parameter if kernel has offset variant
     if (hKernel->getWithOffsetParameter()) {
@@ -300,6 +368,20 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueKernelLaunch(
           std::unique_ptr<ur_event_handle_t_>(ur_event_handle_t_::makeNative(
               UR_COMMAND_KERNEL_LAUNCH, hQueue, HIPStream, StreamToken));
       UR_CHECK_ERROR(RetImplEvent->start());
+    }
+
+    // Once event has been started we can unlock MemoryMigrationMutex
+    if (hQueue->getContext()->NumDevices > 1) {
+      for (auto &MemArg : hKernel->Args.MemObjArgs) {
+        // Telling the ur_mem_handle_t that it will need to wait on this kernel
+        // if it has been written to
+        if (phEvent && (MemArg.AccessFlags &
+                        (UR_MEM_FLAG_READ_WRITE | UR_MEM_FLAG_WRITE_ONLY))) {
+          MemArg.Mem->setLastEventWritingToMemObj(RetImplEvent.get());
+        }
+      }
+      // We can release the MemoryMigrationMutexes now
+      MemMigrationLocks.clear();
     }
 
     // Set local mem max size if env var is present
@@ -519,15 +601,28 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferReadRect(
             UR_RESULT_ERROR_INVALID_SIZE);
 
   ur_result_t Result = UR_RESULT_SUCCESS;
-  void *DevPtr = std::get<BufferMem>(hBuffer->Mem).getVoid();
+  ur_lock MemoryMigrationLock(hBuffer->MemoryMigrationMutex);
+  // Note that this entry point may be called on a specific queue that may not
+  // be the last queue to write to the MemBuffer
+  auto DeviceToCopyFrom = hBuffer->LastEventWritingToMemObj == nullptr
+                              ? hQueue->getDevice()
+                              : hBuffer->LastEventWritingToMemObj->getDevice();
+  void *DevPtr = std::get<BufferMem>(hBuffer->Mem).getVoid(DeviceToCopyFrom);
   std::unique_ptr<ur_event_handle_t_> RetImplEvent{nullptr};
 
   try {
-    ScopedContext Active(hQueue->getDevice());
+    ScopedContext Active(DeviceToCopyFrom);
     hipStream_t HIPStream = hQueue->getNextTransferStream();
 
-    Result = enqueueEventsWait(hQueue, HIPStream, numEventsInWaitList,
-                               phEventWaitList);
+    UR_CHECK_ERROR(enqueueEventsWait(hQueue, HIPStream, numEventsInWaitList,
+                                     phEventWaitList));
+    if (hBuffer->LastEventWritingToMemObj != nullptr &&
+        hQueue->getDevice() != DeviceToCopyFrom) {
+      // We may have to wait for an event on another queue if it is the last
+      // event writing to mem obj
+      UR_CHECK_ERROR(enqueueEventsWait(hQueue, HIPStream, 1,
+                                       &hBuffer->LastEventWritingToMemObj));
+    }
 
     if (phEvent) {
       RetImplEvent =
@@ -567,7 +662,7 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferWriteRect(
     uint32_t numEventsInWaitList, const ur_event_handle_t *phEventWaitList,
     ur_event_handle_t *phEvent) {
   ur_result_t Result = UR_RESULT_SUCCESS;
-  void *DevPtr = std::get<BufferMem>(hBuffer->Mem).getVoid();
+  void *DevPtr = std::get<BufferMem>(hBuffer->Mem).getVoid(hQueue->getDevice());
   std::unique_ptr<ur_event_handle_t_> RetImplEvent{nullptr};
 
   try {
@@ -635,8 +730,10 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferCopy(
       UR_CHECK_ERROR(RetImplEvent->start());
     }
 
-    auto Src = std::get<BufferMem>(hBufferSrc->Mem).getWithOffset(srcOffset);
-    auto Dst = std::get<BufferMem>(hBufferDst->Mem).getWithOffset(dstOffset);
+    auto Src = std::get<BufferMem>(hBufferSrc->Mem)
+                   .getPtrWithOffset(hQueue->getDevice(), srcOffset);
+    auto Dst = std::get<BufferMem>(hBufferDst->Mem)
+                   .getPtrWithOffset(hQueue->getDevice(), dstOffset);
 
     UR_CHECK_ERROR(hipMemcpyDtoDAsync(Dst, Src, size, Stream));
 
@@ -661,8 +758,10 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferCopyRect(
     uint32_t numEventsInWaitList, const ur_event_handle_t *phEventWaitList,
     ur_event_handle_t *phEvent) {
   ur_result_t Result = UR_RESULT_SUCCESS;
-  void *SrcPtr = std::get<BufferMem>(hBufferSrc->Mem).getVoid();
-  void *DstPtr = std::get<BufferMem>(hBufferDst->Mem).getVoid();
+  void *SrcPtr =
+      std::get<BufferMem>(hBufferSrc->Mem).getVoid(hQueue->getDevice());
+  void *DstPtr =
+      std::get<BufferMem>(hBufferDst->Mem).getVoid(hQueue->getDevice());
   std::unique_ptr<ur_event_handle_t_> RetImplEvent{nullptr};
 
   try {
@@ -771,7 +870,8 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferFill(
       UR_CHECK_ERROR(RetImplEvent->start());
     }
 
-    auto DstDevice = std::get<BufferMem>(hBuffer->Mem).getWithOffset(offset);
+    auto DstDevice = std::get<BufferMem>(hBuffer->Mem)
+                         .getPtrWithOffset(hQueue->getDevice(), offset);
     auto N = size / patternSize;
 
     // pattern size in bytes
@@ -891,21 +991,39 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemImageRead(
     ur_rect_offset_t origin, ur_rect_region_t region, size_t, size_t,
     void *pDst, uint32_t numEventsInWaitList,
     const ur_event_handle_t *phEventWaitList, ur_event_handle_t *phEvent) {
-  UR_ASSERT(hImage->MemType == ur_mem_handle_t_::Type::Surface,
-            UR_RESULT_ERROR_INVALID_MEM_OBJECT);
+  UR_ASSERT(hImage->isImage(), UR_RESULT_ERROR_INVALID_MEM_OBJECT);
 
   ur_result_t Result = UR_RESULT_SUCCESS;
 
+  ur_lock MemoryMigrationLock(hImage->MemoryMigrationMutex);
+
+  // Note that this entry point may be called on a specific queue that may not
+  // be the last queue to write to the MemBuffer
+  auto DeviceToCopyFrom = hImage->LastEventWritingToMemObj == nullptr
+                              ? hQueue->getDevice()
+                              : hImage->LastEventWritingToMemObj->getDevice();
+
   try {
-    ScopedContext Active(hQueue->getDevice());
-    hipStream_t HIPStream = hQueue->getNextTransferStream();
+    ScopedContext Active(DeviceToCopyFrom);
+    // Use the default stream if copying from another device
+    hipStream_t HIPStream = DeviceToCopyFrom == hQueue->getDevice()
+                                ? hQueue->getNextTransferStream()
+                                : hipStream_t{0};
 
     if (phEventWaitList) {
-      Result = enqueueEventsWait(hQueue, HIPStream, numEventsInWaitList,
-                                 phEventWaitList);
+      UR_CHECK_ERROR(enqueueEventsWait(hQueue, HIPStream, numEventsInWaitList,
+                                       phEventWaitList));
+    }
+    if (hImage->LastEventWritingToMemObj != nullptr &&
+        hQueue->getDevice() != DeviceToCopyFrom) {
+      // We may have to wait for an event on another queue if it is the last
+      // event writing to mem obj
+      UR_CHECK_ERROR(enqueueEventsWait(hQueue, HIPStream, 1,
+                                       &hImage->LastEventWritingToMemObj));
     }
 
-    hipArray *Array = std::get<SurfaceMem>(hImage->Mem).getArray();
+    hipArray *Array =
+        std::get<SurfaceMem>(hImage->Mem).getArray(DeviceToCopyFrom);
 
     hipArray_Format Format;
     size_t NumChannels;
@@ -959,8 +1077,7 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemImageWrite(
     ur_rect_offset_t origin, ur_rect_region_t region, size_t, size_t,
     void *pSrc, uint32_t numEventsInWaitList,
     const ur_event_handle_t *phEventWaitList, ur_event_handle_t *phEvent) {
-  UR_ASSERT(hImage->MemType == ur_mem_handle_t_::Type::Surface,
-            UR_RESULT_ERROR_INVALID_MEM_OBJECT);
+  UR_ASSERT(hImage->isImage(), UR_RESULT_ERROR_INVALID_MEM_OBJECT);
 
   ur_result_t Result = UR_RESULT_SUCCESS;
 
@@ -973,7 +1090,8 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemImageWrite(
                                  phEventWaitList);
     }
 
-    hipArray *Array = std::get<SurfaceMem>(hImage->Mem).getArray();
+    hipArray *Array =
+        std::get<SurfaceMem>(hImage->Mem).getArray(hQueue->getDevice());
 
     hipArray_Format Format;
     size_t NumChannels;
@@ -1026,10 +1144,8 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemImageCopy(
     ur_rect_offset_t dstOrigin, ur_rect_region_t region,
     uint32_t numEventsInWaitList, const ur_event_handle_t *phEventWaitList,
     ur_event_handle_t *phEvent) {
-  UR_ASSERT(hImageSrc->MemType == ur_mem_handle_t_::Type::Surface,
-            UR_RESULT_ERROR_INVALID_MEM_OBJECT);
-  UR_ASSERT(hImageDst->MemType == ur_mem_handle_t_::Type::Surface,
-            UR_RESULT_ERROR_INVALID_MEM_OBJECT);
+  UR_ASSERT(hImageSrc->isImage(), UR_RESULT_ERROR_INVALID_MEM_OBJECT);
+  UR_ASSERT(hImageDst->isImage(), UR_RESULT_ERROR_INVALID_MEM_OBJECT);
   UR_ASSERT(std::get<SurfaceMem>(hImageSrc->Mem).getImageType() ==
                 std::get<SurfaceMem>(hImageDst->Mem).getImageType(),
             UR_RESULT_ERROR_INVALID_MEM_OBJECT);
@@ -1044,12 +1160,14 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemImageCopy(
                                  phEventWaitList);
     }
 
-    hipArray *SrcArray = std::get<SurfaceMem>(hImageSrc->Mem).getArray();
+    hipArray *SrcArray =
+        std::get<SurfaceMem>(hImageSrc->Mem).getArray(hQueue->getDevice());
     hipArray_Format SrcFormat;
     size_t SrcNumChannels;
     getArrayDesc(SrcArray, SrcFormat, SrcNumChannels);
 
-    hipArray *DstArray = std::get<SurfaceMem>(hImageDst->Mem).getArray();
+    hipArray *DstArray =
+        std::get<SurfaceMem>(hImageDst->Mem).getArray(hQueue->getDevice());
     hipArray_Format DstFormat;
     size_t DstNumChannels;
     getArrayDesc(DstArray, DstFormat, DstNumChannels);
@@ -1110,8 +1228,7 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferMap(
     ur_map_flags_t mapFlags, size_t offset, size_t size,
     uint32_t numEventsInWaitList, const ur_event_handle_t *phEventWaitList,
     ur_event_handle_t *phEvent, void **ppRetMap) {
-  UR_ASSERT(hBuffer->MemType == ur_mem_handle_t_::Type::Buffer,
-            UR_RESULT_ERROR_INVALID_MEM_OBJECT);
+  UR_ASSERT(hBuffer->isBuffer(), UR_RESULT_ERROR_INVALID_MEM_OBJECT);
   auto &BufferImpl = std::get<BufferMem>(hBuffer->Mem);
   UR_ASSERT(offset + size <= BufferImpl.getSize(),
             UR_RESULT_ERROR_INVALID_SIZE);
@@ -1170,8 +1287,7 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemUnmap(
     uint32_t numEventsInWaitList, const ur_event_handle_t *phEventWaitList,
     ur_event_handle_t *phEvent) {
   ur_result_t Result = UR_RESULT_SUCCESS;
-  UR_ASSERT(hMem->MemType == ur_mem_handle_t_::Type::Buffer,
-            UR_RESULT_ERROR_INVALID_MEM_OBJECT);
+  UR_ASSERT(hMem->isBuffer(), UR_RESULT_ERROR_INVALID_MEM_OBJECT);
   UR_ASSERT(std::get<BufferMem>(hMem->Mem).getMapPtr() != nullptr,
             UR_RESULT_ERROR_INVALID_MEM_OBJECT);
   UR_ASSERT(std::get<BufferMem>(hMem->Mem).getMapPtr() == pMappedPtr,
@@ -1311,7 +1427,7 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueUSMPrefetch(
     ur_usm_migration_flags_t flags, uint32_t numEventsInWaitList,
     const ur_event_handle_t *phEventWaitList, ur_event_handle_t *phEvent) {
   void *HIPDevicePtr = const_cast<void *>(pMem);
-  ur_device_handle_t Device = hQueue->getContext()->getDevice();
+  ur_device_handle_t Device = hQueue->getDevice();
 
   // If the device does not support managed memory access, we can't set
   // mem_advise.

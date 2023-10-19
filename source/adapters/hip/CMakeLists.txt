@@ -148,6 +148,6 @@ else()
     message(FATAL_ERROR "Unspecified UR HIP platform please set UR_HIP_PLATFORM to 'AMD' or 'NVIDIA'")
 endif()
 
-target_include_directories(${TARGET_NAME} PRIVATE
+target_include_directories(${TARGET_NAME} BEFORE PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../../"
 )
