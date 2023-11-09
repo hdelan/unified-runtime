@@ -34,13 +34,14 @@ typedef void (*ur_context_extended_deleter_t)(void *UserData);
 /// UR API context are objects that are passed to functions, and not bound
 /// to threads.
 ///
-/// Since the ur_context_handle_t can contain multiple devices, and a `hipCtx_t`
-/// refers to only a single device, the `hipCtx_t` is more tightly coupled to a
-/// ur_device_handle_t than a ur_context_handle_t. In order to remove some
-/// ambiguities about the different semantics of ur_context_handle_t s and
-/// native `hipCtx_t`, we access the native `hipCtx_t` solely through the
-/// ur_device_handle_t class, by using the RAII object \ref ScopedDevice, which
-/// sets the active device (by setting the active native `hipCtx_t`).
+/// Since the ur_context_handle_t can contain multiple devices, and a
+/// `hipCtx_t` refers to only a single device, the `hipCtx_t` is more tightly
+/// coupled to a ur_device_handle_t than a ur_context_handle_t. In order to
+/// remove some ambiguities about the different semantics of
+/// ur_context_handle_t and native `hipCtx_t`, we access the native `hipCtx_t`
+/// solely through the ur_device_handle_t class, by using the object
+/// \ref ScopedContext, which sets the active device (by setting the active
+/// native `hipCtx_t`).
 ///
 /// <b> Primary vs User-defined `hipCtx_t` </b>
 ///
@@ -79,12 +80,11 @@ struct ur_context_handle_t_ {
   using native_type = hipCtx_t;
 
   std::vector<ur_device_handle_t> Devices;
-  uint32_t NumDevices;
 
   std::atomic_uint32_t RefCount;
 
   ur_context_handle_t_(const ur_device_handle_t *Devs, uint32_t NumDevices)
-      : Devices{Devs, Devs + NumDevices}, NumDevices{NumDevices}, RefCount{1} {
+      : Devices{Devs, Devs + NumDevices}, RefCount{1} {
     for (auto &Dev : Devices) {
       urDeviceRetain(Dev);
     }

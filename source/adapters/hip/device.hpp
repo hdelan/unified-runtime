@@ -43,11 +43,11 @@ public:
 
   ur_platform_handle_t getPlatform() const noexcept { return Platform; };
 
-  hipCtx_t getNativeContext() { return HIPContext; };
+  hipCtx_t getNativeContext() const noexcept { return HIPContext; };
 
   // Returns the index of the device relative to the other devices in the same
   // platform
-  uint32_t getIndex() const { return DeviceIndex; };
+  uint32_t getIndex() const noexcept { return DeviceIndex; };
 };
 
 int getAttribute(ur_device_handle_t Device, hipDeviceAttribute_t Attribute);

@@ -124,10 +124,10 @@ struct ur_kernel_handle_t_ {
       assert(hMem && "Invalid mem handle");
       // To avoid redundancy we are not storing mem obj with index i at index
       // i in the vec of MemObjArgs.
-      for (auto i = 0u; i < MemObjArgs.size(); ++i) {
-        if (MemObjArgs[i].Index == Index) {
+      for (auto &Arg : MemObjArgs) {
+        if (Arg.Index == Index) {
           // Overwrite the mem obj with the same index
-          MemObjArgs[i] = arguments::mem_obj_arg{hMem, Index, Flags};
+          Arg = arguments::mem_obj_arg{hMem, Index, Flags};
           return;
         }
       }

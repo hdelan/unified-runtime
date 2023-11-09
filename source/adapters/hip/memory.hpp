@@ -66,12 +66,12 @@ public:
             AllocMode Mode, void *HostPtr, size_t Size)
       : OuterMemStruct{OuterMemStruct}, HostPtr{HostPtr}, Size{Size},
         MapSize{0}, MapOffset{0}, MapPtr{nullptr}, MapFlags{UR_MAP_FLAG_WRITE},
-        MemAllocMode{Mode}, Ptrs(Context->NumDevices, native_type{0}){};
+        MemAllocMode{Mode}, Ptrs(Context->Devices.size(), native_type{0}){};
 
   BufferMem(const BufferMem &Buffer) = default;
 
-  // This will allocate memory on device with index Index if there isn't already
-  // an active allocation on the device
+  // This will allocate memory on device if there isn't already an active
+  // allocation on the device
   native_type getPtr(const ur_device_handle_t Device) {
     return getPtrWithOffset(Device, 0);
   }
@@ -88,8 +88,8 @@ public:
         reinterpret_cast<uint8_t *>(Ptrs[Device->getIndex()]) + Offset);
   }
 
-  // This will allocate memory on device with index Index if there isn't already
-  // an active allocation on the device
+  // This will allocate memory on device if there isn't already an active
+  // allocation on the device
   void *getVoid(const ur_device_handle_t Device) {
     return reinterpret_cast<void *>(getPtrWithOffset(Device, 0));
   }
@@ -185,8 +185,9 @@ public:
   SurfaceMem(ur_context_handle_t Context, ur_mem_handle_t OuterMemStruct,
              ur_image_format_t ImageFormat, ur_image_desc_t ImageDesc,
              void *HostPtr)
-      : Arrays(Context->NumDevices, nullptr),
-        SurfObjs(Context->NumDevices, nullptr), OuterMemStruct{OuterMemStruct},
+      : Arrays(Context->Devices.size(), nullptr),
+        SurfObjs(Context->Devices.size(), nullptr),
+        OuterMemStruct{OuterMemStruct},
         ImageFormat{ImageFormat}, ImageDesc{ImageDesc}, HostPtr{HostPtr} {
     // We have to use hipArray3DCreate, which has some caveats. The height and
     // depth parameters must be set to 0 produce 1D or 2D arrays. image_desc
@@ -414,7 +415,7 @@ struct ur_mem_handle_t_ {
   ur_mem_handle_t_(ur_context_handle_t Ctxt, ur_mem_flags_t MemFlags,
                    BufferMem::AllocMode Mode, void *HostPtr, size_t Size)
       : Context{Ctxt}, RefCount{1}, MemFlags{MemFlags},
-        HaveMigratedToDeviceSinceLastWrite(Context->NumDevices, false),
+        HaveMigratedToDeviceSinceLastWrite(Context->Devices.size(), false),
         Mem{std::in_place_type<BufferMem>, Ctxt, this, Mode, HostPtr, Size} {
     urContextRetain(Context);
   };
@@ -422,7 +423,8 @@ struct ur_mem_handle_t_ {
   // Subbuffer constructor
   ur_mem_handle_t_(ur_mem Parent, size_t SubBufferOffset)
       : Context{Parent->Context}, RefCount{1}, MemFlags{Parent->MemFlags},
-        HaveMigratedToDeviceSinceLastWrite(Parent->Context->NumDevices, false),
+        HaveMigratedToDeviceSinceLastWrite(Parent->Context->Devices.size(),
+                                           false),
         Mem{BufferMem{std::get<BufferMem>(Parent->Mem)}} {
     auto &SubBuffer = std::get<BufferMem>(Mem);
     SubBuffer.Parent = Parent;
@@ -444,7 +446,7 @@ struct ur_mem_handle_t_ {
                    ur_image_format_t ImageFormat, ur_image_desc_t ImageDesc,
                    void *HostPtr)
       : Context{Ctxt}, RefCount{1}, MemFlags{MemFlags},
-        HaveMigratedToDeviceSinceLastWrite(Context->NumDevices, false),
+        HaveMigratedToDeviceSinceLastWrite(Context->Devices.size(), false),
         Mem{std::in_place_type<SurfaceMem>,
             Ctxt,
             this,
@@ -491,10 +493,8 @@ struct ur_mem_handle_t_ {
 
   void setLastEventWritingToMemObj(ur_event_handle_t NewEvent) {
     assert(NewEvent && "Invalid event!");
-    // We only need this functionality for multi device context
-    if (Context->NumDevices == 1) {
-      return;
-    }
+    // This entry point should only ever be called when using multi device ctx
+    assert(Context->Devices.size() > 1);
     if (LastEventWritingToMemObj != nullptr) {
       urEventRelease(LastEventWritingToMemObj);
     }

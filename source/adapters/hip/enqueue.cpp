@@ -144,31 +144,32 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferRead(
             UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
   UR_ASSERT(hBuffer->isBuffer(), UR_RESULT_ERROR_INVALID_EVENT_WAIT_LIST);
 
-  ur_result_t Result = UR_RESULT_SUCCESS;
   std::unique_ptr<ur_event_handle_t_> RetImplEvent{nullptr};
 
   ur_lock MemoryMigrationLock{hBuffer->MemoryMigrationMutex};
-  // Note that this entry point may be called on a specific queue that may not
-  // be the last queue to write to the MemBuffer
-  auto DeviceToCopyFrom = hBuffer->LastEventWritingToMemObj == nullptr
-                              ? hQueue->getDevice()
-                              : hBuffer->LastEventWritingToMemObj->getDevice();
+  auto Device = hQueue->getDevice();
+  hipStream_t HIPStream = hQueue->getNextTransferStream();
 
   try {
-    ScopedContext Active(DeviceToCopyFrom);
-    // Use the default stream if copying from another device
-    hipStream_t HIPStream = DeviceToCopyFrom == hQueue->getDevice()
-                                ? hQueue->getNextTransferStream()
-                                : hipStream_t{0};
-    Result = enqueueEventsWait(hQueue, HIPStream, numEventsInWaitList,
-                               phEventWaitList);
+    // Note that this entry point may be called on a queue that may not be the
+    // last queue to write to the MemBuffer, meaning we must perform the copy
+    // from a different device
     if (hBuffer->LastEventWritingToMemObj != nullptr &&
-        hQueue->getDevice() != DeviceToCopyFrom) {
+        hBuffer->LastEventWritingToMemObj->getDevice() != hQueue->getDevice()) {
+      Device = hBuffer->LastEventWritingToMemObj->getDevice();
+      ScopedContext Active(Device);
+      HIPStream = hipStream_t{0}; // Default stream for different device
       // We may have to wait for an event on another queue if it is the last
       // event writing to mem obj
       UR_CHECK_ERROR(enqueueEventsWait(hQueue, HIPStream, 1,
                                        &hBuffer->LastEventWritingToMemObj));
     }
+
+    ScopedContext Active(Device);
+
+    // Use the default stream if copying from another device
+    UR_CHECK_ERROR(enqueueEventsWait(hQueue, HIPStream, numEventsInWaitList,
+                                     phEventWaitList));
 
     if (phEvent) {
       RetImplEvent =
@@ -179,11 +180,10 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferRead(
 
     // Copying from the device with latest version of memory, not necessarily
     // the device associated with the Queue
-    UR_CHECK_ERROR(
-        hipMemcpyDtoHAsync(pDst,
-                           std::get<BufferMem>(hBuffer->Mem)
-                               .getPtrWithOffset(DeviceToCopyFrom, offset),
-                           size, HIPStream));
+    UR_CHECK_ERROR(hipMemcpyDtoHAsync(
+        pDst,
+        std::get<BufferMem>(hBuffer->Mem).getPtrWithOffset(Device, offset),
+        size, HIPStream));
 
     if (phEvent) {
       UR_CHECK_ERROR(RetImplEvent->record());
@@ -198,9 +198,9 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferRead(
     }
 
   } catch (ur_result_t err) {
-    Result = err;
+    return err;
   }
-  return Result;
+  return UR_RESULT_SUCCESS;
 }
 
 UR_APIEXPORT ur_result_t UR_APICALL urEnqueueKernelLaunch(
@@ -221,7 +221,7 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueKernelLaunch(
   // runtime. However since UR handles memory dependencies within a context
   // we may need to add more events to our dependent events list if the UR
   // context contains multiple devices
-  if (hQueue->getContext()->NumDevices > 1) {
+  if (hQueue->getContext()->Devices.size() > 1) {
     MemMigrationLocks.reserve(hKernel->Args.MemObjArgs.size());
     for (auto &MemArg : hKernel->Args.MemObjArgs) {
       bool PushBack = false;
@@ -339,7 +339,7 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueKernelLaunch(
     }
 
     // For memory migration across devices in the same context
-    if (hQueue->getContext()->NumDevices > 1) {
+    if (hQueue->getContext()->Devices.size() > 1) {
       for (auto &MemArg : hKernel->Args.MemObjArgs) {
         migrateMemoryToDeviceIfNeeded(MemArg.Mem, hQueue->getDevice());
       }
@@ -371,7 +371,7 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueKernelLaunch(
     }
 
     // Once event has been started we can unlock MemoryMigrationMutex
-    if (hQueue->getContext()->NumDevices > 1) {
+    if (hQueue->getContext()->Devices.size() > 1) {
       for (auto &MemArg : hKernel->Args.MemObjArgs) {
         // Telling the ur_mem_handle_t that it will need to wait on this kernel
         // if it has been written to
@@ -600,29 +600,32 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferReadRect(
   UR_ASSERT(!(hostSlicePitch != 0 && hostSlicePitch % hostRowPitch != 0),
             UR_RESULT_ERROR_INVALID_SIZE);
 
-  ur_result_t Result = UR_RESULT_SUCCESS;
-  ur_lock MemoryMigrationLock(hBuffer->MemoryMigrationMutex);
-  // Note that this entry point may be called on a specific queue that may not
-  // be the last queue to write to the MemBuffer
-  auto DeviceToCopyFrom = hBuffer->LastEventWritingToMemObj == nullptr
-                              ? hQueue->getDevice()
-                              : hBuffer->LastEventWritingToMemObj->getDevice();
-  void *DevPtr = std::get<BufferMem>(hBuffer->Mem).getVoid(DeviceToCopyFrom);
   std::unique_ptr<ur_event_handle_t_> RetImplEvent{nullptr};
 
-  try {
-    ScopedContext Active(DeviceToCopyFrom);
-    hipStream_t HIPStream = hQueue->getNextTransferStream();
+  ur_result_t Result = UR_RESULT_SUCCESS;
+  ur_lock MemoryMigrationLock(hBuffer->MemoryMigrationMutex);
+  auto Device = hQueue->getDevice();
+  hipStream_t HIPStream = hQueue->getNextTransferStream();
 
-    UR_CHECK_ERROR(enqueueEventsWait(hQueue, HIPStream, numEventsInWaitList,
-                                     phEventWaitList));
+  try {
+    // Note that this entry point may be called on a queue that may not be the
+    // last queue to write to the MemBuffer, meaning we must perform the copy
+    // from a different device
     if (hBuffer->LastEventWritingToMemObj != nullptr &&
-        hQueue->getDevice() != DeviceToCopyFrom) {
+        hBuffer->LastEventWritingToMemObj->getDevice() != hQueue->getDevice()) {
+      Device = hBuffer->LastEventWritingToMemObj->getDevice();
+      ScopedContext Active(Device);
+      HIPStream = hipStream_t{0}; // Default stream for different device
       // We may have to wait for an event on another queue if it is the last
       // event writing to mem obj
       UR_CHECK_ERROR(enqueueEventsWait(hQueue, HIPStream, 1,
                                        &hBuffer->LastEventWritingToMemObj));
     }
+
+    ScopedContext Active(Device);
+
+    UR_CHECK_ERROR(enqueueEventsWait(hQueue, HIPStream, numEventsInWaitList,
+                                     phEventWaitList));
 
     if (phEvent) {
       RetImplEvent =
@@ -631,10 +634,11 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferReadRect(
       UR_CHECK_ERROR(RetImplEvent->start());
     }
 
-    Result = commonEnqueueMemBufferCopyRect(
+    void *DevPtr = std::get<BufferMem>(hBuffer->Mem).getVoid(Device);
+    UR_CHECK_ERROR(commonEnqueueMemBufferCopyRect(
         HIPStream, region, &DevPtr, hipMemoryTypeDevice, bufferOrigin,
         bufferRowPitch, bufferSlicePitch, pDst, hipMemoryTypeHost, hostOrigin,
-        hostRowPitch, hostSlicePitch);
+        hostRowPitch, hostSlicePitch));
 
     if (phEvent) {
       UR_CHECK_ERROR(RetImplEvent->record());
@@ -995,35 +999,33 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemImageRead(
 
   ur_result_t Result = UR_RESULT_SUCCESS;
 
-  ur_lock MemoryMigrationLock(hImage->MemoryMigrationMutex);
-
-  // Note that this entry point may be called on a specific queue that may not
-  // be the last queue to write to the MemBuffer
-  auto DeviceToCopyFrom = hImage->LastEventWritingToMemObj == nullptr
-                              ? hQueue->getDevice()
-                              : hImage->LastEventWritingToMemObj->getDevice();
+  ur_lock MemoryMigrationLock{hImage->MemoryMigrationMutex};
+  auto Device = hQueue->getDevice();
+  hipStream_t HIPStream = hQueue->getNextTransferStream();
 
   try {
-    ScopedContext Active(DeviceToCopyFrom);
-    // Use the default stream if copying from another device
-    hipStream_t HIPStream = DeviceToCopyFrom == hQueue->getDevice()
-                                ? hQueue->getNextTransferStream()
-                                : hipStream_t{0};
-
-    if (phEventWaitList) {
-      UR_CHECK_ERROR(enqueueEventsWait(hQueue, HIPStream, numEventsInWaitList,
-                                       phEventWaitList));
-    }
+    // Note that this entry point may be called on a queue that may not be the
+    // last queue to write to the MemBuffer, meaning we must perform the copy
+    // from a different device
     if (hImage->LastEventWritingToMemObj != nullptr &&
-        hQueue->getDevice() != DeviceToCopyFrom) {
+        hImage->LastEventWritingToMemObj->getDevice() != hQueue->getDevice()) {
+      Device = hImage->LastEventWritingToMemObj->getDevice();
+      ScopedContext Active(Device);
+      HIPStream = hipStream_t{0}; // Default stream for different device
       // We may have to wait for an event on another queue if it is the last
       // event writing to mem obj
       UR_CHECK_ERROR(enqueueEventsWait(hQueue, HIPStream, 1,
                                        &hImage->LastEventWritingToMemObj));
     }
 
-    hipArray *Array =
-        std::get<SurfaceMem>(hImage->Mem).getArray(DeviceToCopyFrom);
+    ScopedContext Active(Device);
+
+    if (phEventWaitList) {
+      UR_CHECK_ERROR(enqueueEventsWait(hQueue, HIPStream, numEventsInWaitList,
+                                       phEventWaitList));
+    }
+
+    hipArray *Array = std::get<SurfaceMem>(hImage->Mem).getArray(Device);
 
     hipArray_Format Format;
     size_t NumChannels;

@@ -347,7 +347,7 @@ allocateMemObjOnDeviceIfNeeded(ur_mem_handle_t Mem,
     try {
       auto &Image = std::get<SurfaceMem>(Mem->Mem);
       // Allocation has already been made
-      if (Image.getArray(hDevice) != nullptr) {
+      if (Image.getArray(hDevice)) {
         return UR_RESULT_SUCCESS;
       }
       UR_CHECK_ERROR(hipArray3DCreate(
@@ -366,12 +366,12 @@ allocateMemObjOnDeviceIfNeeded(ur_mem_handle_t Mem,
       UR_CHECK_ERROR(hipCreateSurfaceObject(&Surface, &ImageResDesc));
       Image.SurfObjs[hDevice->getIndex()] = Surface;
     } catch (ur_result_t Err) {
-      if (ImageArray != nullptr) {
+      if (ImageArray) {
         UR_CHECK_ERROR(hipFreeArray(ImageArray));
       }
       return Err;
     } catch (...) {
-      if (ImageArray != nullptr) {
+      if (ImageArray) {
         UR_CHECK_ERROR(hipFreeArray(ImageArray));
       }
       return UR_RESULT_ERROR_UNKNOWN;
