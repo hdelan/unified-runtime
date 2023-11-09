@@ -154,7 +154,7 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferRead(
     // Note that this entry point may be called on a queue that may not be the
     // last queue to write to the MemBuffer, meaning we must perform the copy
     // from a different device
-    if (hBuffer->LastEventWritingToMemObj != nullptr &&
+    if (hBuffer->LastEventWritingToMemObj &&
         hBuffer->LastEventWritingToMemObj->getDevice() != hQueue->getDevice()) {
       Device = hBuffer->LastEventWritingToMemObj->getDevice();
       ScopedContext Active(Device);
@@ -611,7 +611,7 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemBufferReadRect(
     // Note that this entry point may be called on a queue that may not be the
     // last queue to write to the MemBuffer, meaning we must perform the copy
     // from a different device
-    if (hBuffer->LastEventWritingToMemObj != nullptr &&
+    if (hBuffer->LastEventWritingToMemObj &&
         hBuffer->LastEventWritingToMemObj->getDevice() != hQueue->getDevice()) {
       Device = hBuffer->LastEventWritingToMemObj->getDevice();
       ScopedContext Active(Device);
@@ -1007,7 +1007,7 @@ UR_APIEXPORT ur_result_t UR_APICALL urEnqueueMemImageRead(
     // Note that this entry point may be called on a queue that may not be the
     // last queue to write to the MemBuffer, meaning we must perform the copy
     // from a different device
-    if (hImage->LastEventWritingToMemObj != nullptr &&
+    if (hImage->LastEventWritingToMemObj &&
         hImage->LastEventWritingToMemObj->getDevice() != hQueue->getDevice()) {
       Device = hImage->LastEventWritingToMemObj->getDevice();
       ScopedContext Active(Device);
