@@ -76,7 +76,7 @@ urContextGetInfo(ur_context_handle_t hContext, ur_context_info_t propName,
 
   switch (uint32_t{propName}) {
   case UR_CONTEXT_INFO_NUM_DEVICES:
-    return ReturnValue(hContext->Devices.size());
+    return ReturnValue(static_cast<uint32_t>(hContext->Devices.size()));
   case UR_CONTEXT_INFO_DEVICES:
     return ReturnValue(hContext->getDevices());
   case UR_CONTEXT_INFO_REFERENCE_COUNT:
