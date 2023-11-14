@@ -29,27 +29,26 @@ typedef void (*ur_context_extended_deleter_t)(void *UserData);
 ///
 /// One of the main differences between the UR API and the HIP driver API is
 /// that the second modifies the state of the threads by assigning
-/// `hipCtx_t` objects to threads. `hipCtx_t` objects store data associated
+/// \c hipCtx_t objects to threads. \c hipCtx_t objects store data associated
 /// with a given device and control access to said device from the user side.
 /// UR API context are objects that are passed to functions, and not bound
 /// to threads.
 ///
-/// Since the ur_context_handle_t can contain multiple devices, and a
-/// `hipCtx_t` refers to only a single device, the `hipCtx_t` is more tightly
-/// coupled to a ur_device_handle_t than a ur_context_handle_t. In order to
-/// remove some ambiguities about the different semantics of
-/// ur_context_handle_t and native `hipCtx_t`, we access the native `hipCtx_t`
-/// solely through the ur_device_handle_t class, by using the object
+/// Since the \c ur_context_handle_t can contain multiple devices, and a \c
+/// hipCtx_t refers to only a single device, the \c hipCtx_t is more tightly
+/// coupled to a \c ur_device_handle_t than a \c ur_context_handle_t. In order
+/// to remove some ambiguities about the different semantics of \c
+/// \c ur_context_handle_t and native \c hipCtx_t, we access the native \c
+/// hipCtx_t solely through the \c ur_device_handle_t class, by using the object
 /// \ref ScopedContext, which sets the active device (by setting the active
-/// native `hipCtx_t`).
+/// native \c hipCtx_t).
 ///
-/// <b> Primary vs User-defined `hipCtx_t` </b>
+/// <b> Primary vs User-defined \c hipCtx_t </b>
 ///
-/// HIP has two different types of `hipCtx_t`, the Primary context, which is
+/// HIP has two different types of \c hipCtx_t, the Primary context, which is
 /// usable by all threads on a given process for a given device, and the
-/// aforementioned custom `hipCtx_t`s.
-/// The HIP documentation, confirmed with performance analysis, suggest using
-/// the Primary context whenever possible.
+/// aforementioned custom \c hipCtx_t s. The HIP documentation, confirmed with
+/// performance analysis, suggest using the Primary context whenever possible.
 ///
 ///  <b> Destructor callback </b>
 ///
@@ -61,12 +60,13 @@ typedef void (*ur_context_extended_deleter_t)(void *UserData);
 ///
 ///  <b> Memory Management for Devices in a Context <\b>
 ///
-///  A ur_buffer_ is associated with a ur_context_handle_t_, which may refer to
-///  multiple devices. Therefore the ur_buffer_ must handle a native allocation
-///  for each device in the context. UR is responsible for automatically
-///  handling event dependencies for kernels writing to or reading from the
-///  same ur_buffer_ and migrating memory between native allocations for
-///  devices in the same ur_context_handle_t_ if necessary.
+///  A \c ur_mem_handle_t is associated with a \c ur_context_handle_t_, which
+///  may refer to multiple devices. Therefore the \c ur_mem_handle_t must
+///  handle a native allocation for each device in the context. UR is
+///  responsible for automatically handling event dependencies for kernels
+///  writing to or reading from the same \c ur_mem_handle_t and migrating memory
+///  between native allocations for devices in the same \c ur_context_handle_t_
+///  if necessary.
 ///
 struct ur_context_handle_t_ {
 
