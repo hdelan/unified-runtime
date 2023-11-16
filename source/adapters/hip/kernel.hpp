@@ -160,7 +160,7 @@ struct ur_kernel_handle_t_ {
       : Function{Func}, FunctionWithOffsetParam{FuncWithOffsetParam},
         Name{Name}, Context{Ctxt}, Program{Program}, RefCount{1} {
     ur_result_t RetError = urKernelGetGroupInfo(
-        this, Context->getDevice(),
+        this, Program->getDevice(),
         UR_KERNEL_GROUP_INFO_COMPILE_WORK_GROUP_SIZE,
         sizeof(ReqdThreadsPerBlock), ReqdThreadsPerBlock, nullptr);
     (void)RetError;
