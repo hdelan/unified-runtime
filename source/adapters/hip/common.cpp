@@ -29,6 +29,10 @@ ur_result_t mapErrorUR(amd_comgr_status_t Result) {
 }
 #endif
 
+UR_APIEXPORT void blah_symbol() {
+  return;
+}
+
 ur_result_t mapErrorUR(hipError_t Result) {
   switch (Result) {
   case hipSuccess:
