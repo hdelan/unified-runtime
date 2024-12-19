@@ -436,7 +436,7 @@ ur_usm_pool_handle_t_::ur_usm_pool_handle_t_(ur_context_handle_t Context,
 ur_usm_pool_handle_t_::ur_usm_pool_handle_t_(ur_context_handle_t Context,
                                              ur_device_handle_t Device,
                                              ur_usm_pool_desc_t *PoolDesc)
-    : Context{Context} {
+    : Context{Context}, Device{Device} {
   if (PoolDesc->flags & UR_USM_POOL_FLAG_USE_NATIVE_MEMORY_POOL_EXP) {
     // TODO: this should only use the host
   }
